@@ -1,0 +1,18 @@
+# Mibe 配置文件示例
+# 复制此文件为 config.toml 并修改为你需要的消息内容
+
+[messages]
+# Codex 相关消息
+codex_started = "codex启动"
+codex_complete = "codex完成"
+codex_aborted = "codex中断"
+
+# Kimi 相关消息
+kimi_started = "kimi启动"
+kimi_complete = "kimi完成"
+
+[settings]
+# Kimi 完成检测的静音时间（秒）
+# 如果在指定时间内没有新消息，则认为会话已完成
+# 如果 Kimi 在处理长任务时误判为完成，可以适当增大此值
+kimi_completion_silence = 2.0

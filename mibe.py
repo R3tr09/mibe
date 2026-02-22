@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Monitor Codex session JSONL logs and notify via XiaoAi (miservice)."""
+"""Monitor Codex/Kimi session JSONL logs and notify via XiaoAi (miservice)."""
 
 from __future__ import annotations
 
@@ -10,11 +10,20 @@ import os
 import signal
 import sys
 from pathlib import Path
+from typing import Callable
 
 from aiohttp import ClientSession
 from miservice import MiAccount, MiNAService
 
-SESSIONS_DIR = Path.home() / ".codex" / "sessions"
+try:
+    import tomllib  # Python 3.11+
+except ImportError:
+    tomllib = None  # type: ignore[assignment]
+
+# Session directories
+CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
+KIMI_SESSIONS_DIR = Path.home() / ".kimi" / "sessions"
+
 POLL_INTERVAL = 0.5
 TOKEN_STORE = str(Path.home() / ".mi.token")
 
@@ -22,19 +31,105 @@ TOKEN_STORE = str(Path.home() / ".mi.token")
 KEEPALIVE_INTERVAL = 5.0
 KEEPALIVE_TEXT = "。"
 
-# TTS messages for each event type.
-MESSAGES: dict[str, str] = {
-    "task_started": "vibe启动",
-    "task_complete": "任务完成",
-    "turn_aborted": "任务中断",
+# Delay (seconds) after TTS to let it finish before muting.
+TTS_SETTLE_DELAY = 3.0
+
+# Silence detection for Kimi completion (seconds)
+KIMI_COMPLETION_SILENCE = 5.0
+
+# Configurable settings (can be overridden via config file)
+SETTINGS: dict[str, float] = {
+    "kimi_completion_silence": KIMI_COMPLETION_SILENCE,
 }
 
-WATCHED_EVENTS = frozenset(MESSAGES)
+# Default TTS messages for each event type.
+DEFAULT_MESSAGES: dict[str, str] = {
+    "codex_started": "codex启动",
+    "codex_complete": "codex完成",
+    "codex_aborted": "codex中断",
+    "kimi_started": "kimi启动",
+    "kimi_complete": "kimi完成",
+}
+
+# Global messages config (loaded from config file)
+MESSAGES: dict[str, str] = DEFAULT_MESSAGES.copy()
+
+
+def load_config(config_path: Path | str | None = None) -> dict:
+    """Load config from TOML file. Returns empty dict if no config found."""
+    global MESSAGES
+
+    paths: list[Path] = []
+    if config_path:
+        paths.append(Path(config_path))
+    else:
+        # Search in common locations
+        paths.extend(
+            [
+                Path("config.toml"),
+                Path.home() / ".config" / "mibe" / "config.toml",
+            ]
+        )
+
+    for p in paths:
+        if p.exists():
+            try:
+                content = p.read_text(encoding="utf-8")
+                if tomllib:
+                    config = tomllib.loads(content)
+                else:
+                    # Fallback: use simple parsing for basic cases
+                    config = _parse_simple_toml(content)
+
+                # Update messages from config
+                if "messages" in config:
+                    for key in DEFAULT_MESSAGES:
+                        if key in config["messages"]:
+                            MESSAGES[key] = config["messages"][key]
+                # Update settings from config
+                if "settings" in config:
+                    for key in SETTINGS:
+                        if key in config["settings"]:
+                            SETTINGS[key] = float(config["settings"][key])
+                return config
+            except Exception as exc:
+                print(
+                    f"[mibe] warning: failed to load config {p}: {exc}", file=sys.stderr
+                )
+
+    return {}
+
+
+def _parse_simple_toml(content: str) -> dict:
+    """Simple TOML parser fallback for basic cases (no tomllib)."""
+    result: dict = {}
+    current_section = None
+
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            current_section = line[1:-1]
+            result[current_section] = {}
+        elif "=" in line and current_section:
+            key, val = line.split("=", 1)
+            key = key.strip()
+            val = val.strip()
+            # Remove quotes
+            if (val.startswith('"') and val.endswith('"')) or (
+                val.startswith("'") and val.endswith("'")
+            ):
+                val = val[1:-1]
+            result[current_section][key] = val
+
+    return result
 
 
 # ---------------------------------------------------------------------------
 # miservice helpers
 # ---------------------------------------------------------------------------
+
 
 class XiaoAiNotifier:
     """Wraps miservice login and TTS via MiNAService."""
@@ -54,7 +149,10 @@ class XiaoAiNotifier:
         mi_did = os.environ.get("MI_DID", "")
 
         if not mi_user or not mi_pass:
-            print("[mibe] error: MI_USER and MI_PASS environment variables required", file=sys.stderr)
+            print(
+                "[mibe] error: MI_USER and MI_PASS environment variables required",
+                file=sys.stderr,
+            )
             raise SystemExit(1)
 
         self._session = ClientSession()
@@ -70,7 +168,10 @@ class XiaoAiNotifier:
                     self._device_id = d.get("deviceID")
                     break
             if not self._device_id:
-                print(f"[mibe] warning: MI_DID={mi_did} not found, using first device", file=sys.stderr)
+                print(
+                    f"[mibe] warning: MI_DID={mi_did} not found, using first device",
+                    file=sys.stderr,
+                )
 
         if not self._device_id and devices:
             self._device_id = devices[0].get("deviceID")
@@ -169,17 +270,22 @@ class XiaoAiNotifier:
 # File monitoring
 # ---------------------------------------------------------------------------
 
-def list_session_files(sessions_dir: Path) -> list[Path]:
+
+def list_session_files(sessions_dir: Path, pattern: str = "*.jsonl") -> list[Path]:
     if not sessions_dir.exists():
         return []
-    return sorted(sessions_dir.rglob("*.jsonl"))
+    return sorted(sessions_dir.rglob(pattern))
 
 
-# Delay (seconds) after TTS to let it finish before muting.
-TTS_SETTLE_DELAY = 3.0
+# ---------------------------------------------------------------------------
+# Codex event processing
+# ---------------------------------------------------------------------------
+
+CODEX_WATCHED_EVENTS = frozenset({"task_started", "task_complete", "turn_aborted"})
 
 
-async def process_event(event: dict, notifier: XiaoAiNotifier) -> None:
+async def process_codex_event(event: dict, notifier: XiaoAiNotifier) -> None:
+    """Process a single Codex event."""
     if event.get("type") != "event_msg":
         return
     payload = event.get("payload")
@@ -187,32 +293,140 @@ async def process_event(event: dict, notifier: XiaoAiNotifier) -> None:
         return
 
     event_type = payload.get("type")
-    if event_type not in WATCHED_EVENTS:
+    if event_type not in CODEX_WATCHED_EVENTS:
         return
 
     turn_id = payload.get("turn_id")
-    print(f"[mibe] {event_type} turn_id={turn_id}", flush=True)
+    print(f"[mibe] codex {event_type} turn_id={turn_id}", flush=True)
 
     if event_type == "task_started":
-        # Announce start, wait for TTS to finish, mute, then keep light on.
-        await notifier.speak(MESSAGES[event_type])
+        await notifier.speak(MESSAGES["codex_started"])
         await asyncio.sleep(TTS_SETTLE_DELAY)
         await notifier.save_and_mute()
         notifier.start_keepalive()
     elif event_type in ("task_complete", "turn_aborted"):
-        # Stop keepalive, restore volume, then announce.
         await notifier.stop_keepalive()
         await notifier.restore_volume()
-        await notifier.speak(MESSAGES[event_type])
-    else:
-        await notifier.speak(MESSAGES[event_type])
+        msg_key = "codex_complete" if event_type == "task_complete" else "codex_aborted"
+        await notifier.speak(MESSAGES[msg_key])
+
+
+# ---------------------------------------------------------------------------
+# Kimi event processing
+# ---------------------------------------------------------------------------
+
+
+class KimiSessionState:
+    """Track state for a single Kimi session to detect completion."""
+
+    def __init__(self) -> None:
+        self.active = False
+        self.last_activity: float = 0.0
+        self.completion_timer: asyncio.Task | None = None
+
+
+KIMI_SESSION_STATES: dict[Path, KimiSessionState] = {}
+
+
+async def _kimi_completion_handler(
+    path: Path, notifier: XiaoAiNotifier, delay: float
+) -> None:
+    """Handle Kimi session completion after silence period."""
+    await asyncio.sleep(delay)
+    state = KIMI_SESSION_STATES.get(path)
+    if state and state.active:
+        state.active = False
+        await notifier.stop_keepalive()
+        await notifier.restore_volume()
+        await notifier.speak(MESSAGES["kimi_complete"])
+        print(f"[mibe] kimi complete (silence detected) path={path}", flush=True)
+
+
+def _get_event_type(msg: dict) -> str | None:
+    """Extract event type from Kimi message, handling nested SubagentEvent."""
+    msg_type = msg.get("type")
+    if not msg_type:
+        return None
+
+    # Handle SubagentEvent with nested TurnEnd/TurnBegin
+    if msg_type == "SubagentEvent":
+        payload = msg.get("payload", {})
+        if isinstance(payload, dict):
+            nested_event = payload.get("event", {})
+            if isinstance(nested_event, dict):
+                nested_type = nested_event.get("type")
+                if nested_type:
+                    return nested_type
+
+    return msg_type
+
+
+async def process_kimi_event(event: dict, path: Path, notifier: XiaoAiNotifier) -> None:
+    """Process a single Kimi event."""
+    msg = event.get("message", {})
+    if not isinstance(msg, dict):
+        msg = {}
+
+    msg_type = _get_event_type(msg)
+
+    # Get or create session state
+    state = KIMI_SESSION_STATES.get(path)
+    if state is None:
+        state = KimiSessionState()
+        KIMI_SESSION_STATES[path] = state
+
+    # Handle TurnBegin (session start)
+    if msg_type == "TurnBegin":
+        if not state.active:
+            state.active = True
+            print(f"[mibe] kimi started path={path}", flush=True)
+            await notifier.speak(MESSAGES["kimi_started"])
+            await asyncio.sleep(TTS_SETTLE_DELAY)
+            await notifier.save_and_mute()
+            notifier.start_keepalive()
+        state.last_activity = asyncio.get_event_loop().time()
+        return
+
+    # Handle TurnEnd (session complete) - including nested in SubagentEvent
+    if msg_type == "TurnEnd" and state.active:
+        state.active = False
+        if state.completion_timer and not state.completion_timer.done():
+            state.completion_timer.cancel()
+        await notifier.stop_keepalive()
+        await notifier.restore_volume()
+        await notifier.speak(MESSAGES["kimi_complete"])
+        print(f"[mibe] kimi complete (TurnEnd) path={path}", flush=True)
+        return
+
+    # For active sessions, ANY event resets the silence timer (not just typed ones).
+    # This prevents false completion during long operations like WriteFile.
+    if state.active:
+        state.last_activity = asyncio.get_event_loop().time()
+
+        # Cancel existing completion timer
+        if state.completion_timer and not state.completion_timer.done():
+            state.completion_timer.cancel()
+
+        # Schedule new completion timer as fallback
+        state.completion_timer = asyncio.create_task(
+            _kimi_completion_handler(
+                path, notifier, SETTINGS["kimi_completion_silence"]
+            )
+        )
+
+
+# ---------------------------------------------------------------------------
+# Generic file reading
+# ---------------------------------------------------------------------------
 
 
 async def read_new_lines(
     path: Path,
     offsets: dict[Path, int],
     notifier: XiaoAiNotifier,
+    processor: Callable[[dict, Path, XiaoAiNotifier], asyncio.Future[None] | None],
 ) -> None:
+    """Read new lines from a file and process them."""
     old_offset = offsets.get(path, 0)
     try:
         file_size = path.stat().st_size
@@ -239,15 +453,17 @@ async def read_new_lines(
             except json.JSONDecodeError:
                 continue
             if isinstance(event, dict):
-                await process_event(event, notifier)
+                result = processor(event, path, notifier)
+                if result is not None:
+                    await result
         offsets[path] = fh.tell()
 
 
 def init_offsets(
-    sessions_dir: Path, replay: str,
+    sessions_dir: Path, replay: str, pattern: str = "*.jsonl"
 ) -> dict[Path, int]:
     """Build initial file-offset map based on replay strategy."""
-    files = list_session_files(sessions_dir)
+    files = list_session_files(sessions_dir, pattern)
     offsets: dict[Path, int] = {}
 
     if replay == "all":
@@ -268,10 +484,11 @@ def init_offsets(
 # CLI: subcommands
 # ---------------------------------------------------------------------------
 
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mibe",
-        description="Monitor Codex session logs and notify via XiaoAi.",
+        description="Monitor Codex/Kimi session logs and notify via XiaoAi.",
     )
     sub = parser.add_subparsers(dest="command")
 
@@ -279,7 +496,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("login", help="Test miservice login and list devices.")
 
     # --- monitor ---
-    mon = sub.add_parser("monitor", help="Watch Codex session logs and send TTS notifications.")
+    mon = sub.add_parser(
+        "monitor", help="Watch session logs and send TTS notifications."
+    )
     mon.add_argument(
         "--replay-existing",
         choices=("none", "latest", "all"),
@@ -287,7 +506,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Replay events on startup (default: none).",
     )
     mon.add_argument(
-        "--verbose", action="store_true", help="Print event and command details.",
+        "--verbose",
+        action="store_true",
+        help="Print event and command details.",
+    )
+    mon.add_argument(
+        "--codex-only",
+        action="store_true",
+        help="Only monitor Codex sessions.",
+    )
+    mon.add_argument(
+        "--kimi-only",
+        action="store_true",
+        help="Only monitor Kimi sessions.",
+    )
+    mon.add_argument(
+        "-c", "--config", metavar="PATH", help="Path to config file (TOML)."
     )
 
     return parser
@@ -299,7 +533,10 @@ async def cmd_login() -> int:
     mi_pass = os.environ.get("MI_PASS", "")
 
     if not mi_user or not mi_pass:
-        print("[mibe] error: set MI_USER and MI_PASS environment variables", file=sys.stderr)
+        print(
+            "[mibe] error: set MI_USER and MI_PASS environment variables",
+            file=sys.stderr,
+        )
         return 1
 
     async with ClientSession() as session:
@@ -319,25 +556,50 @@ async def cmd_login() -> int:
         print("-" * 70)
         for i, d in enumerate(devices, 1):
             did = d.get("miotDID", "")
-            selected = " <--" if (mi_did and did == mi_did) else ("" if mi_did else (" <-- (default)" if i == 1 else ""))
-            print(f"{i:<4} {d.get('name', '?'):<20} {d.get('hardware', '?'):<12} {did:<16} {selected}")
+            selected = (
+                " <--"
+                if (mi_did and did == mi_did)
+                else ("" if mi_did else (" <-- (default)" if i == 1 else ""))
+            )
+            print(
+                f"{i:<4} {d.get('name', '?'):<20} {d.get('hardware', '?'):<12} {did:<16} {selected}"
+            )
 
         if not mi_did:
-            print(f"\n[mibe] tip: set MI_DID={devices[0].get('miotDID', '')} to choose a device")
+            print(
+                f"\n[mibe] tip: set MI_DID={devices[0].get('miotDID', '')} to choose a device"
+            )
 
     return 0
 
 
 async def cmd_monitor(args: argparse.Namespace) -> int:
     """Main monitoring loop."""
-    sessions_dir = Path(os.path.expanduser(str(SESSIONS_DIR)))
+    # Load config file if specified
+    load_config(args.config)
+
+    monitor_codex = not args.kimi_only
+    monitor_kimi = not args.codex_only
 
     notifier = XiaoAiNotifier(verbose=args.verbose)
     await notifier.login()
 
-    offsets = init_offsets(sessions_dir, args.replay_existing)
+    # Initialize offsets for both session types
+    offsets: dict[Path, int] = {}
 
-    print(f"[mibe] watching: {sessions_dir}")
+    if monitor_codex:
+        codex_dir = Path(os.path.expanduser(str(CODEX_SESSIONS_DIR)))
+        offsets.update(init_offsets(codex_dir, args.replay_existing))
+        print(f"[mibe] watching codex: {codex_dir}")
+
+    if monitor_kimi:
+        kimi_dir = Path(os.path.expanduser(str(KIMI_SESSIONS_DIR)))
+        # Kimi uses wire.jsonl files in subdirectories
+        for p in list_session_files(kimi_dir, "wire.jsonl"):
+            if p not in offsets:
+                offsets[p] = 0 if args.replay_existing == "all" else p.stat().st_size
+        print(f"[mibe] watching kimi: {kimi_dir}")
+
     print("[mibe] press Ctrl+C to stop")
 
     loop = asyncio.get_running_loop()
@@ -352,10 +614,22 @@ async def cmd_monitor(args: argparse.Namespace) -> int:
 
     try:
         while not stop_event.is_set():
-            for path in list_session_files(sessions_dir):
-                if path not in offsets:
-                    offsets[path] = 0  # new session file, read from start
-                await read_new_lines(path, offsets, notifier)
+            # Monitor Codex
+            if monitor_codex:
+                codex_dir = Path(os.path.expanduser(str(CODEX_SESSIONS_DIR)))
+                for path in list_session_files(codex_dir, "*.jsonl"):
+                    if path not in offsets:
+                        offsets[path] = 0
+                    await read_new_lines(path, offsets, notifier, process_codex_event)
+
+            # Monitor Kimi
+            if monitor_kimi:
+                kimi_dir = Path(os.path.expanduser(str(KIMI_SESSIONS_DIR)))
+                for path in list_session_files(kimi_dir, "wire.jsonl"):
+                    if path not in offsets:
+                        offsets[path] = 0
+                    await read_new_lines(path, offsets, notifier, process_kimi_event)
+
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=POLL_INTERVAL)
             except asyncio.TimeoutError:
