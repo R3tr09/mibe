@@ -420,11 +420,9 @@ def _build_codex_request_user_input_tts(payload: dict) -> tuple[str, int]:
     )
 
 
-def _build_codex_exec_command_escalation_tts(payload: dict) -> tuple[str, bool]:
-    """Build TTS text for exec_command calls requiring escalated permissions."""
+def _build_codex_escalation_confirmation_tts(payload: dict) -> tuple[str, bool]:
+    """Build TTS text for function calls requiring escalated permissions."""
     if payload.get("type") != "function_call":
-        return "", False
-    if payload.get("name") != "exec_command":
         return "", False
 
     arguments = payload.get("arguments")
@@ -499,18 +497,19 @@ async def _handle_codex_request_user_input(
     await notifier.speak(tts_text)
 
 
-async def _handle_codex_exec_command_escalation(
+async def _handle_codex_escalation_confirmation(
     payload: dict, path: Path, notifier: XiaoAiNotifier
 ) -> None:
-    """Handle exec_command function call events that require user approval."""
-    tts_text, matched = _build_codex_exec_command_escalation_tts(payload)
+    """Handle function call events that require user approval."""
+    tts_text, matched = _build_codex_escalation_confirmation_tts(payload)
     if not matched:
         return
 
     call_id = payload.get("call_id")
+    tool_name = payload.get("name")
     print(
-        "[mibe] codex exec_command require_escalated "
-        f"call_id={call_id} path={path}",
+        "[mibe] codex escalation_confirmation "
+        f"tool={tool_name} call_id={call_id} path={path}",
         flush=True,
     )
 
@@ -532,7 +531,7 @@ async def process_codex_event(
         await _handle_codex_task_event(payload, path, notifier)
     elif event_kind == "response_item":
         await _handle_codex_request_user_input(payload, path, notifier)
-        await _handle_codex_exec_command_escalation(payload, path, notifier)
+        await _handle_codex_escalation_confirmation(payload, path, notifier)
 
 
 # ---------------------------------------------------------------------------

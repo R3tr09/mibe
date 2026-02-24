@@ -393,6 +393,101 @@ class TestProcessCodexEvent:
 
         mock_notifier.speak.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_codex_future_tool_require_escalated_triggers_confirmation_tts(
+        self, tmp_path
+    ):
+        path = tmp_path / "codex.jsonl"
+        event = {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "future_tool",
+                "arguments": json.dumps(
+                    {
+                        "cmd": "do something",
+                        "sandbox_permissions": "require_escalated",
+                        "justification": "Do you want to allow this future tool action?",
+                    }
+                ),
+                "call_id": "call_future_1",
+            },
+        }
+
+        mock_notifier = mock.AsyncMock()
+        await mibe.process_codex_event(event, path, mock_notifier)
+
+        mock_notifier.speak.assert_called_once()
+        speak_text = mock_notifier.speak.call_args.args[0]
+        assert "future tool action" in speak_text
+
+    @pytest.mark.asyncio
+    async def test_codex_escalation_confirmation_falls_back_to_cmd(self, tmp_path):
+        path = tmp_path / "codex.jsonl"
+        event = {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "future_tool",
+                "arguments": json.dumps(
+                    {
+                        "cmd": "pnpm install dependencies",
+                        "sandbox_permissions": "require_escalated",
+                    }
+                ),
+                "call_id": "call_future_2",
+            },
+        }
+
+        mock_notifier = mock.AsyncMock()
+        await mibe.process_codex_event(event, path, mock_notifier)
+
+        speak_text = mock_notifier.speak.call_args.args[0]
+        assert "pnpm install dependencies" in speak_text
+
+    @pytest.mark.asyncio
+    async def test_codex_escalation_confirmation_falls_back_to_generic_prompt(
+        self, tmp_path
+    ):
+        path = tmp_path / "codex.jsonl"
+        event = {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "future_tool",
+                "arguments": json.dumps(
+                    {
+                        "sandbox_permissions": "require_escalated",
+                    }
+                ),
+                "call_id": "call_future_3",
+            },
+        }
+
+        mock_notifier = mock.AsyncMock()
+        await mibe.process_codex_event(event, path, mock_notifier)
+
+        speak_text = mock_notifier.speak.call_args.args[0]
+        assert mibe.MESSAGES["codex_input_fallback_question"] in speak_text
+
+    @pytest.mark.asyncio
+    async def test_codex_escalation_confirmation_ignores_bad_arguments(self, tmp_path):
+        path = tmp_path / "codex.jsonl"
+        event = {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "future_tool",
+                "arguments": "{not-json",
+                "call_id": "call_future_4",
+            },
+        }
+
+        mock_notifier = mock.AsyncMock()
+        await mibe.process_codex_event(event, path, mock_notifier)
+
+        mock_notifier.speak.assert_not_called()
+
 
 class TestProcessKimiEvent:
     """Tests for process_kimi_event function."""

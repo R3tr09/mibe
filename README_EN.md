@@ -53,7 +53,7 @@ uv run python mibe.py monitor
 | Codex `task_complete` | codex completed | Restore volume, then broadcast |
 | Codex `turn_aborted` | codex aborted | Restore volume, then broadcast |
 | Codex `request_user_input` (function call) | codex needs your input + question text | Stop keepalive, restore volume, broadcast, and keep volume unmuted while waiting for user response |
-| Codex `exec_command` (`sandbox_permissions=require_escalated`) | codex needs your input + approval reason/command summary | Stop keepalive, restore volume, broadcast, and keep volume unmuted while waiting for user response |
+| Codex `function_call` (new-format escalation confirmation: `sandbox_permissions=require_escalated`) | codex needs your input + approval reason/command summary | Stop keepalive, restore volume, broadcast, and keep volume unmuted while waiting for user response |
 | Kimi `TurnBegin` | kimi started | Mute after broadcast, send silent TTS periodically to keep light on |
 | Kimi `TurnEnd` | kimi completed | Restore volume, then broadcast |
 
@@ -102,10 +102,10 @@ When mibe detects a Codex function call that requires user confirmation, it broa
 
 - Triggers:
   - `response_item -> function_call(name="request_user_input")`
-  - `response_item -> function_call(name="exec_command")` with `arguments.sandbox_permissions == "require_escalated"`
+  - `response_item -> function_call(*)` with `arguments.sandbox_permissions == "require_escalated"` (new-format escalation confirmation)
 - Template placeholders: `{alert_text}`, `{question_count}`, `{first_question}`
 - `request_user_input` multi-question behavior: broadcast summary of the first question (plus total count)
-- Escalation approval behavior: prefer `justification`, otherwise read a command summary from `cmd`
+- New-format escalation approval behavior: prefer `justification`, otherwise read a command summary from `cmd`
 - Long questions are truncated using `codex_input_question_max_words` (CJK/English-compatible count: English chunks + Han chars), and then users can read the full text in the terminal
 
 Copy `config.toml.example` as a starting point:
