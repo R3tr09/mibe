@@ -275,11 +275,7 @@ class TestProcessCodexEvent:
             "payload": {
                 "type": "function_call",
                 "name": "request_user_input",
-                "arguments": (
-                    '{"questions":[{"question":"'
-                    + long_question
-                    + '"}]}'
-                ),
+                "arguments": ('{"questions":[{"question":"' + long_question + '"}]}'),
                 "call_id": "call_4",
             },
         }

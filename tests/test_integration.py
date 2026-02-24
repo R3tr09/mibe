@@ -167,7 +167,9 @@ class TestFileMonitoring:
         offsets: dict[Path, int] = {}
         mock_notifier = mock.AsyncMock()
 
-        await mibe.read_new_lines(path, offsets, mock_notifier, mibe.process_codex_event)
+        await mibe.read_new_lines(
+            path, offsets, mock_notifier, mibe.process_codex_event
+        )
 
         mock_notifier.speak.assert_called_once()
         speak_text = mock_notifier.speak.call_args.args[0]
